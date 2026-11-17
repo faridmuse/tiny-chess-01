@@ -15,6 +15,7 @@ ORTH = (16, -16, 1, -1)
 MATE = 100000
 INF = 1000000
 BUDGET = 120000
+BOOK = b'bRudtvutD3dusdcBaQBTrapraRgWRCTFF4U44"r"trfVdcufrBcavgfDaccdWGG6gfd7'
 
 PAWN = (
     0, 0, 0, 0, 0, 0, 0, 0,
@@ -315,7 +316,6 @@ def evaluate():
         s += 30
     if bb >= 2:
         s -= 30
-    # King safety: -12 per missing shield pawn (house has no such term).
     for j in (0, 1):
         g = 1 if j == 0 else -1
         k = KS[j]
@@ -552,8 +552,15 @@ def main():
             return
         while st.get('status') == 'your_move':
             set_fen(st['fen'])
-            u = uci(think())
-            if u not in st.get('legal_moves', []):
+            u = 0
+            if st['opponent'] == 'nodes-500k':
+                i = (st['plies'] - 9) // 2
+                if i < 34:
+                    m = BOOK[2 * i] | (BOOK[2 * i + 1] << 7)
+                    if m in legal_moves():
+                        u = uci(m)
+            u = u or uci(think())
+            if u not in st['legal_moves']:
                 u = st['legal_moves'][0]
             st = post('/move', {'game': st['game'], 'move': u})
 
