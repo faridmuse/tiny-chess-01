@@ -8,7 +8,7 @@ DIAG = (15, 17, -15, -17)
 ORTH = (16, -16, 1, -1)
 MATE = 100000
 INF = 1000000
-BUDGET = 15000  # nodes per move (tuned after benchmarking)
+BUDGET = 50000  # nodes per move (tuned after benchmarking)
 
 # PSTs, a1-first (index 0 = a1, 63 = h8). Classic simplified-eval values.
 PAWN = (
@@ -88,7 +88,7 @@ turn = 1
 cast = 0
 ep = -1
 nodes = 0
-NP = [0, 0]  # non-pawn pieces per side (0=white, 1=black), for null-move safety
+KS = [4, 116]  # king squares (0=white, 1=black), tracked incrementally
 T = {}
 KIL = [[0, 0] for _ in range(64)]
 
@@ -138,11 +138,7 @@ def attacked(sq, by):
 
 
 def king_sq(s):
-    k = 6 * s
-    for i in range(128):
-        if not (i & 0x88) and B[i] == k:
-            return i
-    return -1
+    return KS[0 if s > 0 else 1]
 
 
 def gen_moves(captures_only=False):
@@ -229,11 +225,9 @@ def do(m):
         cap_sq = t - 16 * turn
         cap = B[cap_sq]
         B[cap_sq] = 0
-    if cap and abs(cap) > 1:
-        NP[0 if cap > 0 else 1] -= 1
-    if pr:
-        NP[0 if turn > 0 else 1] += 1
     u = (f, t, cap_sq, cap, cast, ep, piece, pr)
+    if abs(piece) == 6:
+        KS[0 if turn > 0 else 1] = t
     if abs(piece) == 6 and abs(t - f) == 2:
         if t > f:
             B[t - 1] = B[t + 1]
@@ -275,10 +269,8 @@ def undo(m, u):
     B[t] = 0
     if cap:
         B[cap_sq] = cap
-        if abs(cap) > 1:
-            NP[0 if cap > 0 else 1] += 1
-    if pr:
-        NP[0 if piece > 0 else 1] -= 1
+    if abs(piece) == 6:
+        KS[0 if piece > 0 else 1] = f
 
 
 def legal_moves(captures_only=False):
@@ -382,17 +374,7 @@ def search(depth, alpha, beta, ply):
     if depth == 0:
         return qsearch(alpha, beta, ply)
     in_check = attacked(king_sq(turn), -turn)
-    if depth >= 3 and not in_check and NP[0 if turn > 0 else 1] > 0:
-        ep0 = ep
-        ep = -1
-        turn = -turn
-        try:
-            s = -search(depth - 3, -beta, -beta + 1, ply + 1)
-        finally:
-            turn = -turn
-            ep = ep0
-        if s >= beta:
-            return beta
+    key = None
     key = None
     ent = None
     tt_move = 0
@@ -419,9 +401,15 @@ def search(depth, alpha, beta, ply):
     best = -INF
     flag = 2
     best_m = 0
-    for m in moves:
+    for i, m in enumerate(moves):
         u = do(m)
-        s = -search(depth - 1, -beta, -alpha, ply + 1)
+        if i >= 3 and depth >= 3 and u[3] == 0 and not (m >> 14) \
+                and not in_check and not attacked(king_sq(turn), -turn):
+            s = -search(depth - 2, -beta, -alpha, ply + 1)
+            if s > alpha:
+                s = -search(depth - 1, -beta, -alpha, ply + 1)
+        else:
+            s = -search(depth - 1, -beta, -alpha, ply + 1)
         undo(m, u)
         if s > best:
             best = s
@@ -474,10 +462,11 @@ def think():
 
 
 def set_fen(fen):
-    global turn, cast, ep, B, NP
+    global turn, cast, ep, B
     parts = fen.split()
     B = [0] * 128
-    NP = [0, 0]
+    KS[0] = 4
+    KS[1] = 116
     rows = parts[0].split('/')
     for r, row in enumerate(rows):
         f = 0
@@ -487,8 +476,8 @@ def set_fen(fen):
             else:
                 v = 'PNBRQK'.index(ch.upper()) + 1
                 B[(7 - r) * 16 + f] = v if ch.isupper() else -v
-                if v > 1:
-                    NP[0 if ch.isupper() else 1] += 1
+                if v == 6:
+                    KS[0 if ch.isupper() else 1] = (7 - r) * 16 + f
                 f += 1
     turn = 1 if parts[1] == 'w' else -1
     cast = 0
