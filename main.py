@@ -71,6 +71,16 @@ KING = (
     20, 20, 0, 0, 0, 0, 20, 20,
     20, 30, 10, 0, 0, 10, 30, 20,
 )
+KING_END = (
+    -50, -30, -30, -30, -30, -30, -30, -50,
+    -30, -30, 0, 0, 0, 0, -30, -30,
+    -30, -10, 20, 30, 30, 20, -10, -30,
+    -30, -10, 30, 40, 40, 30, -10, -30,
+    -30, -10, 30, 40, 40, 30, -10, -30,
+    -30, -10, 20, 30, 30, 20, -10, -30,
+    -30, -20, -10, 0, 0, -10, -20, -30,
+    -50, -40, -30, -20, -20, -30, -40, -50,
+)
 PST = (None, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING)
 
 B = [0] * 128
@@ -78,6 +88,8 @@ turn = 1
 cast = 0
 ep = -1
 nodes = 0
+T = {}
+KIL = [[0, 0] for _ in range(64)]
 
 
 def enc(f, t, pr=0):
@@ -272,25 +284,44 @@ def legal_moves(captures_only=False):
 
 def evaluate():
     s = 0
+    queens = 0
     for sq in range(128):
         if sq & 0x88:
             continue
         p = B[sq]
         if p:
+            if abs(p) == 5:
+                queens += 1
             i = (sq & 7) + ((sq >> 4) << 3)
             if p > 0:
                 s += VAL[p] + PST[p][i]
             else:
                 s -= VAL[-p] + PST[-p][63 - i]
+    if queens == 0:
+        # endgame: centralise the kings (re-score both kings with KING_END)
+        for sq in range(128):
+            if sq & 0x88:
+                continue
+            p = B[sq]
+            if abs(p) == 6:
+                i = (sq & 7) + ((sq >> 4) << 3)
+                if p > 0:
+                    s += KING_END[i] - KING[i]
+                else:
+                    s -= KING_END[63 - i] - KING[63 - i]
     return s
 
 
-def order(moves):
+def order(moves, tt_move=0, ply=0):
     def key(m):
+        if m == tt_move:
+            return 1 << 30
         t = (m >> 7) & 127
         v = B[t]
         if v:
             return 10 * VAL[abs(v)] - VAL[abs(B[m & 127])] // 10
+        if KIL[ply][0] == m or KIL[ply][1] == m:
+            return 1000
         return 0
     moves.sort(key=key, reverse=True)
     return moves
@@ -341,22 +372,52 @@ def search(depth, alpha, beta, ply):
         raise Abort
     if depth == 0:
         return qsearch(alpha, beta, ply)
-    moves = order(legal_moves())
+    key = None
+    ent = None
+    tt_move = 0
+    if depth >= 2:
+        key = (tuple(B), turn, cast, ep)
+        ent = T.get(key)
+    if ent:
+        ed, es, ef, em = ent
+        tt_move = em
+        if ed >= depth:
+            if ef == 0:
+                return es
+            if ef == 1 and es > alpha:
+                alpha = es
+            if ef == 2 and es < beta:
+                beta = es
+            if alpha >= beta:
+                return es
+    moves = order(legal_moves(), tt_move, ply)
     if not moves:
         if attacked(king_sq(turn), -turn):
             return -MATE + ply
         return 0
     best = -INF
+    flag = 2
+    best_m = 0
     for m in moves:
         u = do(m)
         s = -search(depth - 1, -beta, -alpha, ply + 1)
         undo(m, u)
         if s > best:
             best = s
+            best_m = m
         if s > alpha:
             alpha = s
+            flag = 0
         if alpha >= beta:
+            flag = 1
+            if B[(m >> 7) & 127] == 0 and KIL[ply][0] != m:
+                KIL[ply][1] = KIL[ply][0]
+                KIL[ply][0] = m
             break
+    if key is not None and abs(best) < MATE - 1000:
+        T[key] = (depth, best, flag, best_m)
+        if len(T) > 300000:
+            T.clear()
     return best
 
 
