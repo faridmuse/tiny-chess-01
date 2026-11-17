@@ -88,6 +88,7 @@ turn = 1
 cast = 0
 ep = -1
 nodes = 0
+NP = [0, 0]  # non-pawn pieces per side (0=white, 1=black), for null-move safety
 T = {}
 KIL = [[0, 0] for _ in range(64)]
 
@@ -228,6 +229,10 @@ def do(m):
         cap_sq = t - 16 * turn
         cap = B[cap_sq]
         B[cap_sq] = 0
+    if cap and abs(cap) > 1:
+        NP[0 if cap > 0 else 1] -= 1
+    if pr:
+        NP[0 if turn > 0 else 1] += 1
     u = (f, t, cap_sq, cap, cast, ep, piece, pr)
     if abs(piece) == 6 and abs(t - f) == 2:
         if t > f:
@@ -270,6 +275,10 @@ def undo(m, u):
     B[t] = 0
     if cap:
         B[cap_sq] = cap
+        if abs(cap) > 1:
+            NP[0 if cap > 0 else 1] += 1
+    if pr:
+        NP[0 if piece > 0 else 1] -= 1
 
 
 def legal_moves(captures_only=False):
@@ -366,12 +375,24 @@ def qsearch(alpha, beta, ply):
 
 
 def search(depth, alpha, beta, ply):
-    global nodes
+    global nodes, turn, ep
     nodes += 1
     if nodes > BUDGET:
         raise Abort
     if depth == 0:
         return qsearch(alpha, beta, ply)
+    in_check = attacked(king_sq(turn), -turn)
+    if depth >= 3 and not in_check and NP[0 if turn > 0 else 1] > 0:
+        ep0 = ep
+        ep = -1
+        turn = -turn
+        try:
+            s = -search(depth - 3, -beta, -beta + 1, ply + 1)
+        finally:
+            turn = -turn
+            ep = ep0
+        if s >= beta:
+            return beta
     key = None
     ent = None
     tt_move = 0
@@ -453,9 +474,10 @@ def think():
 
 
 def set_fen(fen):
-    global turn, cast, ep, B
+    global turn, cast, ep, B, NP
     parts = fen.split()
     B = [0] * 128
+    NP = [0, 0]
     rows = parts[0].split('/')
     for r, row in enumerate(rows):
         f = 0
@@ -465,6 +487,8 @@ def set_fen(fen):
             else:
                 v = 'PNBRQK'.index(ch.upper()) + 1
                 B[(7 - r) * 16 + f] = v if ch.isupper() else -v
+                if v > 1:
+                    NP[0 if ch.isupper() else 1] += 1
                 f += 1
     turn = 1 if parts[1] == 'w' else -1
     cast = 0
