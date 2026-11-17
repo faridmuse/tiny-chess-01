@@ -8,7 +8,7 @@ DIAG = (15, 17, -15, -17)
 ORTH = (16, -16, 1, -1)
 MATE = 100000
 INF = 1000000
-BUDGET = 50000  # nodes per move (tuned after benchmarking)
+BUDGET = 75000  # nodes per move (tuned after benchmarking)
 
 # PSTs, a1-first (index 0 = a1, 63 = h8). Classic simplified-eval values.
 PAWN = (
@@ -374,6 +374,8 @@ def search(depth, alpha, beta, ply):
     if depth == 0:
         return qsearch(alpha, beta, ply)
     in_check = attacked(king_sq(turn), -turn)
+    if in_check:
+        depth += 1
     key = None
     key = None
     ent = None
