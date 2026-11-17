@@ -1,535 +1,2 @@
-"""Dev version of the tiny-chess-01 engine (readable; golfed into main.py later)."""
-import os, json, urllib.request
-
-VAL = (0, 100, 320, 330, 500, 900, 20000)
-KN = (33, 31, 18, 14, -14, -18, -31, -33)
-KI = (16, -16, 1, -1, 15, 17, -15, -17)
-DIAG = (15, 17, -15, -17)
-ORTH = (16, -16, 1, -1)
-MATE = 100000
-INF = 1000000
-BUDGET = 75000  # nodes per move (tuned after benchmarking)
-
-# PSTs, a1-first (index 0 = a1, 63 = h8). Classic simplified-eval values.
-PAWN = (
-    0, 0, 0, 0, 0, 0, 0, 0,
-    5, 10, 10, -20, -20, 10, 10, 5,
-    5, -5, -10, 0, 0, -10, -5, 5,
-    0, 0, 0, 20, 20, 0, 0, 0,
-    5, 5, 10, 25, 25, 10, 5, 5,
-    10, 10, 20, 30, 30, 20, 10, 10,
-    50, 50, 50, 50, 50, 50, 50, 50,
-    0, 0, 0, 0, 0, 0, 0, 0,
-)
-KNIGHT = (
-    -50, -40, -30, -30, -30, -30, -40, -50,
-    -40, -20, 0, 0, 0, 0, -20, -40,
-    -30, 0, 10, 15, 15, 10, 0, -30,
-    -30, 5, 15, 20, 20, 15, 5, -30,
-    -30, 0, 15, 20, 20, 15, 0, -30,
-    -30, 5, 10, 15, 15, 10, 5, -30,
-    -40, -20, 0, 5, 5, 0, -20, -40,
-    -50, -40, -30, -30, -30, -30, -40, -50,
-)
-BISHOP = (
-    -20, -10, -10, -10, -10, -10, -10, -20,
-    -10, 0, 0, 0, 0, 0, 0, -10,
-    -10, 0, 5, 10, 10, 5, 0, -10,
-    -10, 5, 5, 10, 10, 5, 5, -10,
-    -10, 0, 10, 10, 10, 10, 0, -10,
-    -10, 10, 10, 10, 10, 10, 10, -10,
-    -10, 5, 0, 0, 0, 0, 5, -10,
-    -20, -10, -10, -10, -10, -10, -10, -20,
-)
-ROOK = (
-    0, 0, 0, 0, 0, 0, 0, 0,
-    5, 10, 10, 10, 10, 10, 10, 5,
-    -5, 0, 0, 0, 0, 0, 0, -5,
-    -5, 0, 0, 0, 0, 0, 0, -5,
-    -5, 0, 0, 0, 0, 0, 0, -5,
-    -5, 0, 0, 0, 0, 0, 0, -5,
-    -5, 0, 0, 0, 0, 0, 0, -5,
-    0, 0, 0, 5, 5, 0, 0, 0,
-)
-QUEEN = (
-    -20, -10, -10, -5, -5, -10, -10, -20,
-    -10, 0, 0, 0, 0, 0, 0, -10,
-    -10, 0, 5, 5, 5, 5, 0, -10,
-    -5, 0, 5, 5, 5, 5, 0, -5,
-    0, 0, 5, 5, 5, 5, 0, -5,
-    -10, 5, 5, 5, 5, 5, 0, -10,
-    -10, 0, 5, 0, 0, 0, 0, -10,
-    -20, -10, -10, -5, -5, -10, -10, -20,
-)
-KING = (
-    -30, -40, -40, -50, -50, -40, -40, -30,
-    -30, -40, -40, -50, -50, -40, -40, -30,
-    -30, -40, -40, -50, -50, -40, -40, -30,
-    -30, -40, -40, -50, -50, -40, -40, -30,
-    -20, -30, -30, -40, -40, -30, -30, -20,
-    -10, -20, -20, -20, -20, -20, -20, -10,
-    20, 20, 0, 0, 0, 0, 20, 20,
-    20, 30, 10, 0, 0, 10, 30, 20,
-)
-KING_END = (
-    -50, -30, -30, -30, -30, -30, -30, -50,
-    -30, -30, 0, 0, 0, 0, -30, -30,
-    -30, -10, 20, 30, 30, 20, -10, -30,
-    -30, -10, 30, 40, 40, 30, -10, -30,
-    -30, -10, 30, 40, 40, 30, -10, -30,
-    -30, -10, 20, 30, 30, 20, -10, -30,
-    -30, -20, -10, 0, 0, -10, -20, -30,
-    -50, -40, -30, -20, -20, -30, -40, -50,
-)
-PST = (None, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING)
-
-B = [0] * 128
-turn = 1
-cast = 0
-ep = -1
-nodes = 0
-KS = [4, 116]  # king squares (0=white, 1=black), tracked incrementally
-T = {}
-KIL = [[0, 0] for _ in range(64)]
-
-
-def enc(f, t, pr=0):
-    return f | (t << 7) | (pr << 14)
-
-
-def attacked(sq, by):
-    if by > 0:
-        for o in (-15, -17):
-            t = sq + o
-            if not (t & 0x88) and B[t] == 1:
-                return True
-    else:
-        for o in (15, 17):
-            t = sq + o
-            if not (t & 0x88) and B[t] == -1:
-                return True
-    for o in KN:
-        t = sq + o
-        if not (t & 0x88) and B[t] == by * 2:
-            return True
-    for o in KI:
-        t = sq + o
-        if not (t & 0x88) and B[t] == by * 6:
-            return True
-    for o in DIAG:
-        t = sq + o
-        while not (t & 0x88):
-            p = B[t]
-            if p:
-                if p == by * 3 or p == by * 5:
-                    return True
-                break
-            t += o
-    for o in ORTH:
-        t = sq + o
-        while not (t & 0x88):
-            p = B[t]
-            if p:
-                if p == by * 4 or p == by * 5:
-                    return True
-                break
-            t += o
-    return False
-
-
-def king_sq(s):
-    return KS[0 if s > 0 else 1]
-
-
-def gen_moves(captures_only=False):
-    ms = []
-    for sq in range(128):
-        if sq & 0x88:
-            continue
-        p = B[sq]
-        if p == 0 or (p > 0) != (turn > 0):
-            continue
-        a = abs(p)
-        if a == 1:
-            d = 16 * turn
-            last = 7 if turn > 0 else 0
-            t = sq + d
-            if not (t & 0x88) and B[t] == 0:
-                if (t >> 4) == last:
-                    for pr in (5, 4, 3, 2):
-                        ms.append(enc(sq, t, pr))
-                elif not captures_only:
-                    ms.append(enc(sq, t, 0))
-                    if (sq >> 4) == (1 if turn > 0 else 6):
-                        t2 = sq + 2 * d
-                        if B[t2] == 0:
-                            ms.append(enc(sq, t2, 0))
-            for dd in (d - 1, d + 1):
-                t = sq + dd
-                if t & 0x88:
-                    continue
-                if (B[t] != 0 and (B[t] > 0) != (turn > 0)) or t == ep:
-                    if (t >> 4) == last:
-                        for pr in (5, 4, 3, 2):
-                            ms.append(enc(sq, t, pr))
-                    else:
-                        ms.append(enc(sq, t, 0))
-        elif a == 2 or a == 6:
-            for o in (KN if a == 2 else KI):
-                t = sq + o
-                if t & 0x88:
-                    continue
-                if B[t] == 0 or (B[t] > 0) != (turn > 0):
-                    if not captures_only or B[t] != 0:
-                        ms.append(enc(sq, t, 0))
-        else:
-            dirs = DIAG if a == 3 else ORTH if a == 4 else KI
-            for o in dirs:
-                t = sq + o
-                while not (t & 0x88):
-                    if B[t] == 0:
-                        if not captures_only:
-                            ms.append(enc(sq, t, 0))
-                    else:
-                        if (B[t] > 0) != (turn > 0):
-                            ms.append(enc(sq, t, 0))
-                        break
-                    t += o
-    if not captures_only:
-        if turn > 0:
-            if cast & 1 and B[5] == 0 and B[6] == 0 and B[7] == 4 \
-                    and not attacked(4, -1) and not attacked(5, -1) and not attacked(6, -1):
-                ms.append(enc(4, 6))
-            if cast & 2 and B[3] == 0 and B[2] == 0 and B[1] == 0 and B[0] == 4 \
-                    and not attacked(4, -1) and not attacked(3, -1) and not attacked(2, -1):
-                ms.append(enc(4, 2))
-        else:
-            if cast & 4 and B[117] == 0 and B[118] == 0 and B[119] == -4 \
-                    and not attacked(116, 1) and not attacked(117, 1) and not attacked(118, 1):
-                ms.append(enc(116, 118))
-            if cast & 8 and B[115] == 0 and B[114] == 0 and B[113] == 0 and B[112] == -4 \
-                    and not attacked(116, 1) and not attacked(115, 1) and not attacked(114, 1):
-                ms.append(enc(116, 114))
-    return ms
-
-
-def do(m):
-    global turn, cast, ep
-    f = m & 127
-    t = (m >> 7) & 127
-    pr = m >> 14
-    piece = B[f]
-    cap_sq = t
-    cap = B[t]
-    if abs(piece) == 1 and t == ep and cap == 0:
-        cap_sq = t - 16 * turn
-        cap = B[cap_sq]
-        B[cap_sq] = 0
-    u = (f, t, cap_sq, cap, cast, ep, piece, pr)
-    if abs(piece) == 6:
-        KS[0 if turn > 0 else 1] = t
-    if abs(piece) == 6 and abs(t - f) == 2:
-        if t > f:
-            B[t - 1] = B[t + 1]
-            B[t + 1] = 0
-        else:
-            B[t + 1] = B[t - 2]
-            B[t - 2] = 0
-    B[t] = pr * turn if pr else piece
-    B[f] = 0
-    if abs(piece) == 6:
-        cast &= ~(3 if turn > 0 else 12)
-    if f == 0 or t == 0:
-        cast &= ~2
-    if f == 7 or t == 7:
-        cast &= ~1
-    if f == 112 or t == 112:
-        cast &= ~8
-    if f == 119 or t == 119:
-        cast &= ~4
-    ep = f + 16 * turn if abs(piece) == 1 and abs(t - f) == 32 else -1
-    turn = -turn
-    return u
-
-
-def undo(m, u):
-    global turn, cast, ep
-    f, t, cap_sq, cap, cast0, ep0, piece, pr = u
-    turn = -turn
-    cast = cast0
-    ep = ep0
-    if abs(piece) == 6 and abs(t - f) == 2:
-        if t > f:
-            B[t + 1] = B[t - 1]
-            B[t - 1] = 0
-        else:
-            B[t - 2] = B[t + 1]
-            B[t + 1] = 0
-    B[f] = piece
-    B[t] = 0
-    if cap:
-        B[cap_sq] = cap
-    if abs(piece) == 6:
-        KS[0 if piece > 0 else 1] = f
-
-
-def legal_moves(captures_only=False):
-    out = []
-    for m in gen_moves(captures_only):
-        u = do(m)
-        if not attacked(king_sq(-turn), turn):
-            out.append(m)
-        undo(m, u)
-    return out
-
-
-def evaluate():
-    s = 0
-    queens = 0
-    for sq in range(128):
-        if sq & 0x88:
-            continue
-        p = B[sq]
-        if p:
-            if abs(p) == 5:
-                queens += 1
-            i = (sq & 7) + ((sq >> 4) << 3)
-            if p > 0:
-                s += VAL[p] + PST[p][i]
-            else:
-                s -= VAL[-p] + PST[-p][63 - i]
-    if queens == 0:
-        # endgame: centralise the kings (re-score both kings with KING_END)
-        for sq in range(128):
-            if sq & 0x88:
-                continue
-            p = B[sq]
-            if abs(p) == 6:
-                i = (sq & 7) + ((sq >> 4) << 3)
-                if p > 0:
-                    s += KING_END[i] - KING[i]
-                else:
-                    s -= KING_END[63 - i] - KING[63 - i]
-    return s
-
-
-def order(moves, tt_move=0, ply=0):
-    def key(m):
-        if m == tt_move:
-            return 1 << 30
-        t = (m >> 7) & 127
-        v = B[t]
-        if v:
-            return 10 * VAL[abs(v)] - VAL[abs(B[m & 127])] // 10
-        if KIL[ply][0] == m or KIL[ply][1] == m:
-            return 1000
-        return 0
-    moves.sort(key=key, reverse=True)
-    return moves
-
-
-class Abort(Exception):
-    pass
-
-
-def qsearch(alpha, beta, ply):
-    global nodes
-    nodes += 1
-    if nodes > BUDGET:
-        raise Abort
-    if attacked(king_sq(turn), -turn):
-        moves = order(legal_moves())
-        if not moves:
-            return -MATE + ply
-        for m in moves:
-            u = do(m)
-            s = -qsearch(-beta, -alpha, ply + 1)
-            undo(m, u)
-            if s >= beta:
-                return beta
-            if s > alpha:
-                alpha = s
-        return alpha
-    stand = evaluate() * turn
-    if stand >= beta:
-        return beta
-    if stand > alpha:
-        alpha = stand
-    for m in order(legal_moves(True)):
-        u = do(m)
-        s = -qsearch(-beta, -alpha, ply + 1)
-        undo(m, u)
-        if s >= beta:
-            return beta
-        if s > alpha:
-            alpha = s
-    return alpha
-
-
-def search(depth, alpha, beta, ply):
-    global nodes, turn, ep
-    nodes += 1
-    if nodes > BUDGET:
-        raise Abort
-    if depth == 0:
-        return qsearch(alpha, beta, ply)
-    in_check = attacked(king_sq(turn), -turn)
-    if in_check:
-        depth += 1
-    key = None
-    key = None
-    ent = None
-    tt_move = 0
-    if depth >= 2:
-        key = (tuple(B), turn, cast, ep)
-        ent = T.get(key)
-    if ent:
-        ed, es, ef, em = ent
-        tt_move = em
-        if ed >= depth:
-            if ef == 0:
-                return es
-            if ef == 1 and es > alpha:
-                alpha = es
-            if ef == 2 and es < beta:
-                beta = es
-            if alpha >= beta:
-                return es
-    moves = order(legal_moves(), tt_move, ply)
-    if not moves:
-        if attacked(king_sq(turn), -turn):
-            return -MATE + ply
-        return 0
-    best = -INF
-    flag = 2
-    best_m = 0
-    for i, m in enumerate(moves):
-        u = do(m)
-        if i >= 3 and depth >= 3 and u[3] == 0 and not (m >> 14) \
-                and not in_check and not attacked(king_sq(turn), -turn):
-            s = -search(depth - 2, -beta, -alpha, ply + 1)
-            if s > alpha:
-                s = -search(depth - 1, -beta, -alpha, ply + 1)
-        else:
-            s = -search(depth - 1, -beta, -alpha, ply + 1)
-        undo(m, u)
-        if s > best:
-            best = s
-            best_m = m
-        if s > alpha:
-            alpha = s
-            flag = 0
-        if alpha >= beta:
-            flag = 1
-            if B[(m >> 7) & 127] == 0 and KIL[ply][0] != m:
-                KIL[ply][1] = KIL[ply][0]
-                KIL[ply][0] = m
-            break
-    if key is not None and abs(best) < MATE - 1000:
-        T[key] = (depth, best, flag, best_m)
-        if len(T) > 300000:
-            T.clear()
-    return best
-
-
-def think():
-    global nodes, depth_reached
-    nodes = 0
-    depth_reached = 0
-    moves = order(legal_moves())
-    if len(moves) == 1:
-        return moves[0]
-    best = moves[0]
-    try:
-        for depth in range(1, 17):
-            alpha = -INF
-            cur_best = None
-            cur_score = -INF
-            for m in moves:
-                u = do(m)
-                s = -search(depth - 1, -INF, -alpha, 1)
-                undo(m, u)
-                if s > cur_score:
-                    cur_score = s
-                    cur_best = m
-                if s > alpha:
-                    alpha = s
-            best = cur_best
-            depth_reached = depth
-            moves.remove(best)
-            moves.insert(0, best)
-    except Abort:
-        pass
-    return best
-
-
-def set_fen(fen):
-    global turn, cast, ep, B
-    parts = fen.split()
-    B = [0] * 128
-    KS[0] = 4
-    KS[1] = 116
-    rows = parts[0].split('/')
-    for r, row in enumerate(rows):
-        f = 0
-        for ch in row:
-            if ch.isdigit():
-                f += int(ch)
-            else:
-                v = 'PNBRQK'.index(ch.upper()) + 1
-                B[(7 - r) * 16 + f] = v if ch.isupper() else -v
-                if v == 6:
-                    KS[0 if ch.isupper() else 1] = (7 - r) * 16 + f
-                f += 1
-    turn = 1 if parts[1] == 'w' else -1
-    cast = 0
-    if parts[2] != '-':
-        if 'K' in parts[2]:
-            cast |= 1
-        if 'Q' in parts[2]:
-            cast |= 2
-        if 'k' in parts[2]:
-            cast |= 4
-        if 'q' in parts[2]:
-            cast |= 8
-    ep = -1
-    if len(parts) > 3 and parts[3] != '-':
-        ep = (ord(parts[3][0]) - 97) + (int(parts[3][1]) - 1) * 16
-
-
-def uci(m):
-    f = m & 127
-    t = (m >> 7) & 127
-    pr = m >> 14
-    s = chr(97 + (f & 7)) + str((f >> 4) + 1) + chr(97 + (t & 7)) + str((t >> 4) + 1)
-    if pr:
-        s += 'qrbn'[5 - pr]
-    return s
-
-
-def post(path, obj):
-    req = urllib.request.Request(
-        URL + path, data=json.dumps(obj).encode(),
-        headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req) as r:
-        return json.load(r)
-
-
-def main():
-    global URL
-    URL = os.environ['MAKEFUN_ENV_URL'].rstrip('/')
-    while True:
-        st = post('/game', {})
-        if st.get('status') == 'done':
-            print(json.dumps(st))
-            return
-        while st.get('status') == 'your_move':
-            set_fen(st['fen'])
-            u = uci(think())
-            if u not in st.get('legal_moves', []):
-                u = st['legal_moves'][0]
-            st = post('/move', {'game': st['game'], 'move': u})
-
-
-if __name__ == '__main__':
-    main()
+#coding:l1
+import lzma;exec(lzma.decompress('\0@\0\0»:\0\0\0\0\0\0\0hÌ„B%ù\\D‹óÿáÍr†ˆöˆ^áäÃP£÷{ûÿ o®ÁË7ê9{?ÿå¬MY8M¨¨•~\\2^+Åe£¥ÍÑÿ7™şÖ\\Tc\';ŞMi cÈÆ®BH@dŸFØ:KÂiTÔµ×%õ,Å÷®ÏÌ~Ix|2ıŞŞÖ…1RµNLœÇRøá!ZQE²‹¼Æ"É0E†yê~2Æ„ÿDIÈ‰?’åM4íÎ%{ë‘Û½D0<=rñ6®×ùšÎ<l Ä@b	;¾w¯\\ÌÎ=\nF–\0–ğ¹(»wWıÒÆÛ¦½±&–ç&Ì=ÏZƒš¿EÃ–ÉPëuûngTìMg2İ‘®äûç`$Q34?|{øòuz‹ÄuÎ4Ú`ˆ·ĞˆÎ1<M°:Å|&»ÌÊ:¬ùy(óYY¶#ÂlcãmzèòºÛˆáétA¿+ØU\n…†\\Ê;^ J/dS#_³:8\'L­¯‚a×*{Å†d¶.ı$åº6?R‚ô†#Óğœx0÷CUë¦\0SslÑŸ’(sÛ2¢·÷œo“tû•kŞCgQİÎÑ#^#Gds¬EÈO7~_e5óÑ)Û¨–“° $]cñ«ÇºÀ_ì˜š ëÄYí¦v‰ñ¢¬k\rÌš¹|Ï\n÷‹M¤a?Í™-Ó2AºqòºŞn#9©±•KVMó\nº|v0Îß¦Şl¿]è·Ş’V¤*J•„ç„Ü˜³—}»Å.6‡IÈğÎ°ŸÙä> ı¢‘,j¯˜V¬1ìl‰=ª¶—§ğ½íEÀõ	]ªKTõ¢bûOCä7GÆVÅÁ[ÏV³Q^ Ç\rõöM©íİÊ‘×Êi]³Ø•6®Û›<Hã÷ùÏŒ‚íËK\nq®xEš‡!Ñ\rª¨†	µ¼(¡G­Ğd§- Ï*×ƒÊ»WRj®y8êDÅÛ´š6Üß»zVÇ\\vzh²›\rÀ~RÓ0gİ³Ş·’VÏ\'ƒû[P›ZSIãf†é&)t0lÀ»ÔÖ¤H½7ihaAŒóğñ3TI£®	ö}Ÿøå—HˆÒıİ–øßÍ¸Ğªš5ï¸kÒ%Ceî.‹H3jÀ4´T*ƒÇã2Oü}·\rÉ•ìá7+Ûó=}_"%]˜Îé•áÛ¾Ú˜%~Fš]™Ê>€i4I1:Ë^˜Ì±Sv¯ÁŒì¡dˆõşY\0³ÃN0Ì }~lØ¯_<ÍûCå«@egœ€óæÊxSÚ¢÷ãÀcój/UeºÑù®Ä˜å—-ta™§ï•(<;Êo°8Çåº­z6n%SŒˆfSá7÷oŸMgòßŞ;§†ß½È-©wÕ‹ÀthŸEÍSä!j¤X®õˆa^8½i*u¿1Er!õæ|ÚŠª-× %À¦%,‚Üá[TnRD3Z4PŒÎix\0Pêç|bĞú¨¢Á•¾F$ÍC à–[j“Câwdåxî88u¦kÅ‚ö5C….“ƒşjÇV}‘ÅÙ;ŠÜô†İÆK\r¶$|*âËZ1‡%¼ÃîúğiÒ&¥G¥Øgú;JcÃ‚²AÙ6Elù¶œ$;}Ô§“— ¸ugH`¾üVi\nVÌ‰ü2À¤ãPòŠH²THQ)#çÄ\'€„æ*¤ˆ8¢ã’ªQš7Mjƒ…€"OÎüÄ"\nuÏ³z5FšU%gØŒÿ`Ñ…´]tk^äû“”ˆ|ÈîàÜ3U3×ŞÂ2yªôJì–Èã&fJ}ËSË¬cº™\\Z˜Y}Kj¼İÕy^3ÅœñÚÚûÅ#÷†@êı?F\r•åßi{´‰à‡„Ï£¶2ÄÑ¤PK\'\\ÉfÜ@o¥“ô6ŠB7kbÏcN±øC«ó¯‚vG…¸\\Ã¡ï0\\ù5°Ç¸ ô+—ú¸p^EÖş»[ÓëE`“6]Ÿ2Uµñ.ş:Uúó!6EPÀÇBéf„¤˜§nxÃìUxGa›µı0ÍLçu¿)nÒ%;=-+‰T©Öˆ›|ötmªi€CXÇÇáíYÎ—ZD`§”ùqïŒFîd–!ë:Ê0)Ût0™ZÁV˜ùs#¾À—Ï04l–¿Lrùl)N?\rOˆuüÙ*Ëš¦\0#[÷cŸÁ\\àÓã„ÊÔõúëºëåŒ8›ÃÄ¤)(¤e=ŒĞšùª"%=Lñíñãb·]DÄ¤,$ù‰»Ó_Še_VvÛí\næ_çIkh´ãÙe&½Qå¾ì»·Û„*=ÄŸë¼Iò,×Õ\r•œ!¯gk:5—\níqÆ¢äÔ{:Öa(æZ‹-dÆ<:½“Ö4ä™ó±¬ı¶·ÄxëŸÙŞ \\†ëØš·²dƒJOÖ}~«/Ëšµ	[ÔÏä‹B—üdóÔjxİ”%P¬-›Â)y9rËİJ-ccïücÃlöçË°÷Ç?¤?òú¸™p€#ø¾TäÛlÙ=Ü«.£u•’\\òÂÑ·ÄËv²ıŞİ¯øúX­T «!Q_š#YøŸ´OBfX?‡$Œ-0F”d€[€È~2(F¬€{©B\râ´ìÉ2Âácai Éeš@ÃŸX¶¡ĞY=ëA"İÆê¹“¥â!Ó.&V¾¦2©<Ûå¾å\\ÛÁê~–A¯Ü¼c`S+­Ë7ß!äñ6ºÈîûkOĞİlt\\avô·eâ®¹­ùıdÏÌá\\~¥¢—ˆéô¾‡”¥ÿ+ÄÁm<fäƒüŠÏZOï$H6ğ?ü¢XÓ¡³‰ÙçvÈÎ“ÔÃ$»Bd®Ìÿf#±ã‹Èº»TŠ™%ÒFŞ%MB¯^eqïî£²Ü¼m2ã}­Ùƒ›‹öÊ‡BÏ‰==F°ÄùQë÷ÃfÇä«Ä±{Jˆ“Ù¯BXÔß\nĞÎ;LåHÚ*ÏQOãkORJË)éÒ|?Z†¡2+Æ{ÀjY™ïÇñxÕKMoóx¬|ÎÑÌ­^Ó½×’¿ü¤ÆßJj…ÆŸ-‹ØSÌx!\n–…ï„òàãÚuü‰r¶]UˆoOÛÍ5Õ1¾BÈw}…ö“zâ<üçy6§c¯ğQ˜—ğ»½õ“ıòôÒú³<cÅ!n}aGRå¢*vW´¡”MjÅrÅË/öÂĞŞ²à\n0˜2A6ä3‡ğ+1".^[ªá	®hnWæ§#)ÖĞ	#Œİš‰Ö>"ô»Y[D5½Èt”»ï:…µ"„&õü\rúòjÔ\nÎ‰ÜÇ˜dõFdwÕñŞÇƒK+H|!3,¿Ä³ŠÀÃ«ßæùGªŒ™¾Ïz%ºä³¾ÁBİ´7Äh¢Qq§O¾gÈwÛĞ#şö)‚ÿ÷ Ü4œÜõ’º­ØQÙê—÷Ë¥!\0ò¤úàĞ†èú©Zd\nç™¸”ãäìpŠ*^ÊÚzç8ĞÁ”ãù£2Å1]îÆ)åzk‘îÎš8äk;h\rğ–4.@½c;Ûaõ’†[uÒ¯6µç)#I2ËQû°ôó™F-×$¼Š¤TÁ¨SÑ¹å¾_A3\nö¦®rÜzd£†"PÍwZC:ÇÙî†#lYú[èäy/½Å·‘ˆ}´÷,0êÒÕûü":zÊüÕ\n€#ïF1Éd6Öröæ:È›:/Êhé d)2T¬~Ÿ„HRİ›mó-]\\ºõV_Ãı1\'pÖ®£•rü]È³™W36õ!ïŠ÷HOß…i¸ôØğ<û—é\'Ç¼ÓM.|0;ü<ï8‹’µä¬‰mşÇ‘¶›(£yèŸS¾M-¥ÃKºr­ËwùÇ8=ôğûÊ=‰	Z+CEJ÷~a4ü†èõ»k©NÙä°Œ \rımÔ¤™@‡2GëIYÑ¬®Å?.`İ©s±­ÓF5ö‰sNËOéf.6¹.‡òÍè DÆ8DETXUÑ‡¤¬F"êì‰b¡úÊA\r”\rf›S32ÚAY½½£Çû]^yH	û­ì+åFl©ö!)B£õlÿ,*\'æè¼×È=2Á¸x©6ñ“ÆÃ[?"öYÿ’õ$º,"¯%q×Z­ÚSAX:¡ˆ´Ò@,·‡.-bôöÖk=ŠL8Ö^Ê/u’{å±d“Z‘R&Ô	¤Öu¶ @\'‹?sæËÚêEG?óà®|Üá¯ébáaAİ1¡È¤\\Ğ©†]5`ƒÄ´¦¶üú©€ß¸5Dü}ÿSp7x]Ø²–wr÷ë†d-F§ÉMõğzÛŸ\'£š”mc@]/"ñšÁZD7ã k©Àô:Üí5â{>#…‘cÉPAT·ÓÌV“[:Gfb¸“Cß1ØúÑEÎşõ	ÿÛb·à¾½ë³^0ÂÍzX?—şÎ6ìÙnîi-\0#$N˜²ïëRà"IË±ş„†{’ºÜLU”+Wóbg†õ-ozà1‚¶äØğ¿Àgº1¾¨FKm0?rŸÎ™@ˆ&IÂìM±YaÛNÑl­\0¤—ë@q4-6Ê½4F)áùıHŸÑKW2³~ZúD,¢o\0*ÿcØ~¯ÂsÔ¥.åù)2BgèH²;Ã±II±¨“ùY§d°˜-ovoúó>%¨1ÎëUÇªÅqæùT! ]º&\0'.encode('l1')))
